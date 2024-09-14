@@ -14,11 +14,14 @@ import kotlin.coroutines.suspendCoroutine
 /**
  * 運転免許証を読み取るライブラリ。読み取る関数はここにあります。
  *
- * 運転免許証IC仕様書のURLはここです。https://www.npa.go.jp/laws/notification/koutuu/menkyo/menkyo20210630_150.pdf
+ * 運転免許証IC仕様書のURLはここです。https://www.npa.go.jp/laws/notification/koutuu/menkyo/menkyo20220830_187.pdf
  *
  * コルーチンです。
- * */
+ */
 object JDCardReaderCore {
+
+    /** DF1/EF01 のサイズ */
+    private const val DF1EF01_SIZE = 880 + 2 // 880（仕様書通り） + 応答コード 2 バイト
 
     /**
      * カードの読み取りを開始する
@@ -186,17 +189,51 @@ object JDCardReaderCore {
                     throwExceptionAndClose("DF1の選択に失敗。${df1SelectCommandResult.toHexString()}")
                 }
 
-                // 記載事項(DF1/EF01)を読み出す
-                val df1Ef01ReadBinaryCommand = byteArrayOf(
+                // カレントディレクトリを EF01 に移動する
+                // DF1 に移動した後 READ BINARY コマンドで EF01 を指定する方法もあるが、読み出し開始位置を指示するオフセットが、0xFF までしか使えない。
+                // オフセットは P1/P2 で指定することで使えるが、EF01 を指定する場合、P2 しかオフセットの指定で使えず、最大 0xFF までしか読み出し開始位置を指定できない。
+                // 一方 EF01 に移動した後 READ BINARY する場合 0b_111_1111_1111 まで使える（最上位ビットは予約済みで使えない）
+                // 一部の Android 端末は、EF01 全てを取得できない（なぜか 400 バイトで途切れてしまう事があった）。
+                // 400 パイトから先のデータを読み出すためには 0x190 をオフセットに指定する必要があるが、P2 は 0xFF までしか使えないため、READ BINARY で EF01 する方法は使えない。
+                val ef01SelectCommand = byteArrayOf(
                     0x00.toByte(),
-                    0xB0.toByte(),
-                    0x81.toByte(),
+                    0xA4.toByte(),
+                    0x02.toByte(),
+                    0x0C.toByte(),
+                    0x02.toByte(),
                     0x00.toByte(),
-                    0x00.toByte(),
-                    0x03.toByte(),
-                    0x70.toByte(),
+                    0x01.toByte()
                 )
-                val df1Ef01ReadBinaryCommandResult = isoDep.transceive(df1Ef01ReadBinaryCommand)
+                val ef01SelectCommandResult = isoDep.transceive(ef01SelectCommand)
+                if (ef01SelectCommandResult[0] != 0x90.toByte()) {
+                    throwExceptionAndClose("EF01の選択に失敗。${ef01SelectCommandResult.toHexString()}")
+                }
+
+                // 移動したので読み出す
+                // 先述の通り、一度に読み出し出来ない Android 端末があるため、DF1EF01_SIZE バイトになるまでオフセットを足して読んでいく
+                var df1Ef01ReadBinaryCommandResult = byteArrayOf()
+                var readSize = 0
+                while (true) {
+                    val currentReadBinaryCommand = byteArrayOf(
+                        0x00.toByte(),
+                        0xB0.toByte(),
+                        // P1/P2。オフセット 2 バイト分（正しくは最上位ビットを除いた分）
+                        *readSize.toShort().toByteArray(),
+                        //  DF1/EF01 のサイズ
+                        0x00.toByte(),
+                        0x03.toByte(),
+                        0x70.toByte(),
+                    )
+                    val currentReadBinaryCommandResult = isoDep.transceive(currentReadBinaryCommand)
+                    // 読み出しきれない場合に、今読み出せた分を足す
+                    readSize += currentReadBinaryCommandResult.size
+                    df1Ef01ReadBinaryCommandResult += currentReadBinaryCommandResult
+                    // 読み出し終わったら break
+                    if (DF1EF01_SIZE <= readSize) {
+                        break
+                    }
+                }
+
                 if (df1Ef01ReadBinaryCommandResult[df1Ef01ReadBinaryCommandResult.size - 2] == 0x90.toByte()) {
 
                     var currentPos = 0
@@ -425,6 +462,15 @@ object JDCardReaderCore {
             '9' -> 0x39
             else -> 0x00
         }.toByte()
+    }
+
+    /** Short（2バイト数値）をバイト配列に変換する */
+    private fun Short.toByteArray(): ByteArray {
+        val int = this.toInt()
+        return byteArrayOf(
+            (int shr 8).toByte(),
+            int.toByte()
+        )
     }
 
 }
