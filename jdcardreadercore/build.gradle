@@ -54,7 +54,7 @@ afterEvaluate {
                 from components.release
                 groupId = 'com.github.takusan23'
                 artifactId = 'JDCardReaderCore'
-                version = '1.0'
+                version = '1.1'
             }
         }
     }
